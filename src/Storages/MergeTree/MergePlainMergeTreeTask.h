@@ -1,0 +1,122 @@
+#pragma once
+
+#include <Storages/MergeTree/IExecutableTask.h>
+#include <Storages/MergeTree/MergeTask.h>
+#include <Storages/MutationCommands.h>
+#include <Storages/MergeTree/MergeMutateSelectedEntry.h>
+#include <Interpreters/MergeTreeTransactionHolder.h>
+
+
+namespace DB
+{
+
+class StorageMergeTree;
+
+class MergePlainMergeTreeTask : public IExecutableTask
+{
+public:
+    MergePlainMergeTreeTask(
+        StorageMergeTree & storage_,
+        StorageMetadataPtr metadata_snapshot_,
+        bool deduplicate_,
+        Names deduplicate_by_columns_,
+        bool cleanup_,
+        MergeMutateSelectedEntryPtr merge_mutate_entry_,
+        TableLockHolder table_lock_holder_,
+        IExecutableTask::TaskResultCallback & task_result_callback_,
+        ThreadGroupPtr query_thread_group_)
+        : storage(storage_)
+        , metadata_snapshot(std::move(metadata_snapshot_))
+        , deduplicate(deduplicate_)
+        , deduplicate_by_columns(std::move(deduplicate_by_columns_))
+        , cleanup(cleanup_)
+        , merge_mutate_entry(std::move(merge_mutate_entry_))
+        , table_lock_holder(std::move(table_lock_holder_))
+        , task_result_callback(task_result_callback_)
+        , query_thread_group(std::move(query_thread_group_))
+    {
+        for (auto & item : merge_mutate_entry->future_part->parts)
+            priority.value += item->getBytesOnDisk();
+    }
+
+    bool executeStep() override;
+    void onCompleted() override;
+    StorageID getStorageID() const override;
+    Priority getPriority() const override { return priority; }
+    String getQueryId() const override { return getStorageID().getShortName() + "::" + merge_mutate_entry->future_part->name; }
+
+    void setCurrentTransaction(MergeTreeTransactionHolder && txn_holder_, MergeTreeTransactionPtr && txn_)
+    {
+        txn_holder = std::move(txn_holder_);
+        txn = std::move(txn_);
+    }
+
+    void cancel() noexcept override;
+
+private:
+    void prepare();
+    void finish();
+
+    enum class State : uint8_t
+    {
+        NEED_PREPARE,
+        NEED_EXECUTE,
+        NEED_FINISH,
+
+        SUCCESS,
+    };
+
+    State state{State::NEED_PREPARE};
+
+    StorageMergeTree & storage;
+
+    StorageMetadataPtr metadata_snapshot;
+    bool deduplicate;
+    Names deduplicate_by_columns;
+    bool cleanup;
+    MergeMutateSelectedEntryPtr merge_mutate_entry{nullptr};
+    TableLockHolder table_lock_holder;
+    FutureMergedMutatedPartPtr future_part{nullptr};
+    MergeTreeData::MutableDataPartPtr new_part;
+    std::unique_ptr<Stopwatch> stopwatch_ptr{nullptr};
+    using MergeListEntryPtr = std::unique_ptr<MergeListEntry>;
+    MergeListEntryPtr merge_list_entry;
+
+    Priority priority;
+
+    std::function<void(const ExecutionStatus &)> write_part_log;
+    IExecutableTask::TaskResultCallback task_result_callback;
+    MergeTaskPtr merge_task{nullptr};
+
+    MergeTreeTransactionHolder txn_holder;
+    MergeTreeTransactionPtr txn;
+
+    /// Collects the counters and the memory of all threads of the task, from its first step.
+    ThreadGroupPtr thread_group;
+    /// The group of the `OPTIMIZE` query that runs the merge, null for a background merge. It moves into `thread_group`.
+    ThreadGroupPtr query_thread_group;
+
+    ContextMutablePtr task_context;
+
+    ContextMutablePtr createTaskContext() const;
+};
+
+
+using MergePlainMergeTreeTaskPtr = std::shared_ptr<MergePlainMergeTreeTask>;
+
+
+[[ maybe_unused ]] static void executeHere(MergePlainMergeTreeTaskPtr task)
+{
+    try
+    {
+        while (task->executeStep()) {}
+    }
+    catch (...)
+    {
+        task->cancel();
+        throw;
+    }
+}
+
+
+}

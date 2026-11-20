@@ -1,0 +1,3 @@
+Upstream: https://github.com/ClickHouse/ClickHouse
+Revision: c50de3b98b947786c3c83350083bc76439fcb9db
+Original tree: a3d57afe34124baa4c0f4752315ef876e55a3a04
